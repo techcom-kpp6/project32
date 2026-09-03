@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const Stripe = require('stripe');
-const nodemailer = require('nodemailer'); // 1. เพิ่ม Nodemailer
+const nodemailer = require('nodemailer'); 
 
 const app = express();
 
@@ -12,12 +12,12 @@ const MINIMUM_PRICE = 10;
 // ดึง Stripe Secret Key จาก Environment Variable
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_your_stripe_secret_key');
 
-// Config การส่ง Email (แนะนำให้ตั้งค่าผ่าน Environment Variables)
+// Config การส่ง Email
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
-    user: process.env.EMAIL_USER || 'your_email@gmail.com', // อีเมลผู้ส่ง
-    pass: process.env.EMAIL_PASS || 'your_app_password'     // Gmail App Password
+    user: process.env.EMAIL_USER || 'your_email@gmail.com',
+    pass: process.env.EMAIL_PASS || 'your_app_password'
   }
 });
 
@@ -51,7 +51,6 @@ app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  // เมื่อชำระเงินสำเร็จผ่าน Stripe Checkout
   if (event.type === 'checkout.session.completed') {
     const session = event.data.object;
     const lockerId = session.metadata.lockerId;
@@ -59,7 +58,7 @@ app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
 
     if (lockers[lockerId]) {
       lockers[lockerId].paid = true;
-      lockers[lockerId].customerEmail = email; // บันทึกอีเมลที่กรอกตอนจ่ายเงิน
+      lockers[lockerId].customerEmail = email; 
       console.log(`[PAYMENT SUCCESS] Locker ${lockerId} marked as PAID. Email: ${email}`);
     }
   }
@@ -74,15 +73,110 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // ============================================================
-// 3. API ENDPOINTS
+// 3. API & WEB FORM ENDPOINTS
 // ============================================================
 
 app.get('/', (req, res) => {
-  res.send('Smart Locker Backend with Stripe Webhook is running!');
+  res.send('Smart Locker Backend with Web Form & Stripe is running!');
 });
 
 app.get('/api/lockers', (req, res) => {
   res.json({ success: true, lockers });
+});
+
+// --- เพิ่มใหม่: หน้าเว็บฟอร์มสำหรับสแกน QR Code กรอกข้อมูลฝากของ ---
+app.get('/form', (req, res) => {
+  const lockerId = req.query.lockerId;
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Smart Locker Deposit</title>
+      <style>
+        body { font-family: sans-serif; background: #0f172a; color: #fff; padding: 20px; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .card { background: #1e293b; padding: 24px; border-radius: 12px; width: 100%; max-width: 320px; border: 1px solid #334155; box-sizing: border-box; }
+        h2 { text-align: center; color: #38bdf8; margin-top: 0; }
+        label { display: block; margin-bottom: 6px; font-size: 14px; color: #94a3b8; }
+        input { width: 100%; padding: 12px; margin-bottom: 16px; border-radius: 8px; border: 1px solid #475569; background: #0f172a; color: #fff; box-sizing: border-box; font-size: 16px; }
+        button { width: 100%; padding: 12px; background: #38bdf8; color: #0f172a; border: none; border-radius: 8px; font-weight: bold; font-size: 16px; cursor: pointer; }
+        button:active { background: #0ea5e9; }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <h2>Locker #${lockerId}</h2>
+        <form action="/submit-deposit" method="POST">
+          <input type="hidden" name="lockerId" value="${lockerId}">
+          <label>Email Address</label>
+          <input type="email" name="email" required placeholder="name@gmail.com">
+          <label>6-Digit PIN Code</label>
+          <input type="password" name="pin" maxlength="6" pattern="\\d{6}" required placeholder="******">
+          <button type="submit">CONFIRM DEPOSIT</button>
+        </form>
+      </div>
+    </body>
+    </html>
+  `);
+});
+
+// --- เพิ่มใหม่: รับค่าจากเว็บฟอร์มมือถือ แล้วเปลี่ยนสถานะตู้เป็น BUSY และส่งอีเมลยืนยัน ---
+app.post('/submit-deposit', async (req, res) => {
+  const { lockerId, email, pin } = req.body;
+
+  if (!lockers[lockerId]) {
+    return res.status(400).send('Invalid locker ID');
+  }
+  if (lockers[lockerId].status !== 'FREE') {
+    return res.status(400).send('Locker is already in use');
+  }
+
+  // อัปเดตสถานะตู้ในระบบ
+  lockers[lockerId] = {
+    status: 'BUSY',
+    pin: pin,
+    startTime: Date.now(),
+    paid: false,
+    price: 0,
+    customerEmail: email
+  };
+
+  console.log(`[WEB DEPOSIT] Locker ${lockerId} locked via Mobile QR. Email: ${email}, PIN: ${pin}`);
+
+  // ส่งอีเมลยืนยันการฝากของพร้อมแจ้ง PIN
+  try {
+    await transporter.sendMail({
+      from: '"Smart Locker System" <no-reply@smartlocker.com>',
+      to: email,
+      subject: `Deposit Confirmed - Locker #${lockerId}`,
+      html: `
+        <div style="font-family: Arial, sans-serif; padding: 20px;">
+          <h2>Locker Deposit Successful</h2>
+          <p>You have successfully stored your items in Locker <b>#${lockerId}</b>.</p>
+          <p>Your 6-digit PIN code for retrieval is:</p>
+          <h1 style="color: #2563eb; letter-spacing: 5px; font-size: 36px;">${pin}</h1>
+          <p>Please keep this code safe. You will need it to retrieve your items.</p>
+        </div>
+      `
+    });
+  } catch (error) {
+    console.error('[EMAIL ERROR]', error);
+  }
+
+  // แสดงหน้าสำเร็จบนมือถือของผู้ใช้
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Success</title></head>
+    <body style="background:#0f172a;color:#fff;text-align:center;padding-top:50px;font-family:sans-serif;">
+      <h1 style="color:#22c55e;">Success!</h1>
+      <p>Locker #${lockerId} has been locked securely.</p>
+      <p>Check your email for your PIN code.</p>
+      <p style="color:#94a3b8; font-size:14px; margin-top:30px;">You can close this window now.</p>
+    </body>
+    </html>
+  `);
 });
 
 app.post('/api/deposit', (req, res) => {
@@ -163,7 +257,6 @@ app.post('/api/retrieve', async (req, res) => {
   }
 });
 
-// API ใหม่: ส่งรหัสผ่านสุ่ม OTP ไปที่อีเมลที่กรอกตอนชำระเงิน
 app.post('/api/send-otp', async (req, res) => {
   const { lockerId } = req.body;
   const locker = lockers[lockerId];
@@ -173,12 +266,11 @@ app.post('/api/send-otp', async (req, res) => {
   }
 
   if (!locker.customerEmail) {
-    return res.status(400).json({ success: false, message: 'No email found for this locker. Please complete payment first.' });
+    return res.status(400).json({ success: false, message: 'No email found for this locker.' });
   }
 
-  // สุ่มรหัส PIN ใหม่ 6 หลัก
   const newPin = Math.floor(100000 + Math.random() * 900000).toString();
-  locker.pin = newPin; // อัปเดตรหัส PIN ในระบบทันที
+  locker.pin = newPin;
 
   try {
     await transporter.sendMail({
