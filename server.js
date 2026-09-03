@@ -97,8 +97,11 @@ app.post('/api/retrieve', async (req, res) => {
   let minutes = Math.ceil(durationMs / 60000);
   if (minutes < 1) minutes = 1;
 
-  // คิดค่าบริการ 1 บาท/นาที
-  const totalPrice = minutes * 1;
+  // คิดค่าบริการ (กำหนดขั้นต่ำที่ 10 THB เพื่อให้ผ่านเงื่อนไขของ Stripe)
+  let totalPrice = minutes * 1;
+  if (totalPrice < 10) {
+    totalPrice = 10; // ปรับเป็นขั้นต่ำ 10 บาท
+  }
   locker.price = totalPrice;
 
   try {
@@ -110,7 +113,7 @@ app.post('/api/retrieve', async (req, res) => {
           product_data: {
             name: `Smart Locker #${lockerId} (${minutes} Mins)`,
           },
-          unit_amount: totalPrice * 100, // สตางค์
+          unit_amount: totalPrice * 100, // สตางค์ (1000 สตางค์ = 10 บาท)
         },
         quantity: 1,
       }],
