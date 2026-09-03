@@ -10,8 +10,10 @@ const RATE_PER_MINUTE = 1;
 const MINIMUM_PRICE = 10;
 const SERVER_URL = process.env.SERVER_URL || 'https://project32-6fek.onrender.com';
 
+// ดึง Stripe Secret Key จาก Environment Variable
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_your_stripe_secret_key');
 
+// Config การส่ง Email
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
@@ -20,6 +22,7 @@ const transporter = nodemailer.createTransport({
   }
 });
 
+// ข้อมูลสถานะตู้ในระบบ (เก็บ customerEmail และสถานะต่างๆ)
 const lockers = {
   1: { status: 'FREE', pin: null, startTime: null, paid: false, price: 0, customerEmail: null },
   2: { status: 'FREE', pin: null, startTime: null, paid: false, price: 0, customerEmail: null },
@@ -82,6 +85,7 @@ app.get('/api/lockers', (req, res) => {
   res.json({ success: true, lockers });
 });
 
+// --- สร้างลิงก์หน้าเว็บฟอร์มสำหรับสแกน QR Code ---
 app.post('/api/generate-deposit-qr', (req, res) => {
   const { lockerId } = req.body;
 
@@ -96,6 +100,7 @@ app.post('/api/generate-deposit-qr', (req, res) => {
   res.json({ success: true, formUrl: formUrl });
 });
 
+// --- หน้าเว็บฟอร์มสำหรับมือถือสแกนกรอก Email และ PIN ---
 app.get('/form', (req, res) => {
   const lockerId = req.query.lockerId;
   res.send(`
@@ -132,6 +137,7 @@ app.get('/form', (req, res) => {
   `);
 });
 
+// --- รับค่าจากเว็บฟอร์มมือถือ เปลี่ยนสถานะตู้เป็น BUSY และส่งอีเมลยืนยัน PIN ---
 app.post('/submit-deposit', async (req, res) => {
   const { lockerId, email, pin } = req.body;
 
@@ -150,6 +156,8 @@ app.post('/submit-deposit', async (req, res) => {
     price: 0,
     customerEmail: email
   };
+
+  console.log(`[WEB DEPOSIT] Locker ${lockerId} locked via Mobile QR. Email: ${email}, PIN: ${pin}`);
 
   try {
     await transporter.sendMail({
@@ -184,6 +192,7 @@ app.post('/submit-deposit', async (req, res) => {
   `);
 });
 
+// --- API สำหรับตรวจสอบ PIN ตอนกดนำของออก และสร้าง Stripe Checkout Session ---
 app.post('/api/retrieve', async (req, res) => {
   const { lockerId, pin } = req.body;
   const locker = lockers[lockerId];
@@ -225,6 +234,8 @@ app.post('/api/retrieve', async (req, res) => {
       cancel_url: `${SERVER_URL}/cancel`,
     });
 
+    console.log(`[RETRIEVE] Session created for Locker ${lockerId}: ${totalPrice} THB (${minutes} mins)`);
+
     res.json({
       success: true,
       minutes: minutes,
@@ -237,7 +248,7 @@ app.post('/api/retrieve', async (req, res) => {
   }
 });
 
-// --- API สำหรับส่ง OTP หรือ PIN ใหม่ไปยังอีเมลที่ลูกค้าเคยลงทะเบียนไว้ ---
+// --- API สำหรับส่ง OTP / PIN ใหม่ไปยังอีเมล (กรณีลืมรหัสผ่าน) ---
 app.post('/api/send-otp', async (req, res) => {
   const { lockerId } = req.body;
   const locker = lockers[lockerId];
@@ -275,6 +286,7 @@ app.post('/api/send-otp', async (req, res) => {
   }
 });
 
+// --- API เช็คสถานะการชำระเงินเพื่อสั่งปลดล็อกตู้ฝั่ง ESP32 ---
 app.get('/check', (req, res) => {
   const lockerId = req.query.lockerId || 1;
   const locker = lockers[lockerId];
