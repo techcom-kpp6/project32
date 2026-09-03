@@ -5,12 +5,12 @@ const Stripe = require('stripe');
 const app = express();
 
 // ==========================================
-// ตั้งค่าราคาบริการตรงนี้
+// ตั้งค่าราคาบริการตรงนี้ (เปลี่ยนเป็น นาทีละ 1 บาท)
 // ==========================================
-const RATE_PER_MINUTE = 2; // <--- แก้ไขตัวเลขนี้เพื่อเปลี่ยนราคาต่อนาที (เช่น 2 = นาทีละ 2 บาท, 5 = นาทีละ 5 บาท)
+const RATE_PER_MINUTE = 1; // <--- นาทีละ 1 บาท (19 นาที = 19 บาท)
 const MINIMUM_PRICE = 10;   // ราคาขั้นต่ำของระบบ (Stripe บังคับขั้นต่ำ 10 THB)
 
-// ใส่ Stripe Secret Key (หรือใช้ผ่าน Environment Variable บน Render)
+// ใส่ Stripe Secret Key
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_your_stripe_secret_key');
 
 app.use(cors());
@@ -19,7 +19,7 @@ app.get('/', (req, res) => {
   res.send('Smart Locker API Server is running!');
 });
 
-// Webhook Route ต้องอยู่ก่อน express.json() เพื่อรับ Raw Body สำหรับตรวจสอบ Signature
+// Webhook Route
 app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
@@ -76,7 +76,7 @@ app.post('/api/deposit', (req, res) => {
   lockers[lockerId] = {
     status: 'BUSY',
     pin: pin,
-    startTime: Date.now(), // บันทึก เวลาจริง ณ ปัจจุบัน
+    startTime: Date.now(),
     paid: false,
     price: 0
   };
@@ -103,10 +103,10 @@ app.post('/api/retrieve', async (req, res) => {
   let minutes = Math.ceil(durationMs / 60000);
   if (minutes < 1) minutes = 1;
 
-  // คำนวณราคาตามอัตราต่อนาทีที่กำหนดไว้
+  // คำนวณราคาตามนาทีจริง (1 บาท / นาที)
   let totalPrice = minutes * RATE_PER_MINUTE;
 
-  // กำหนดขั้นต่ำที่ 10 THB เพื่อให้ผ่านเงื่อนไขของ Stripe
+  // กำหนดขั้นต่ำที่ 10 THB เฉพาะกรณีที่คำนวณได้น้อยกว่า 10 บาท
   if (totalPrice < MINIMUM_PRICE) {
     totalPrice = MINIMUM_PRICE;
   }
@@ -127,8 +127,8 @@ app.post('/api/retrieve', async (req, res) => {
       }],
       mode: 'payment',
       metadata: { lockerId: String(lockerId) },
-      success_url: 'https://stripe-esp32.onrender.com/success',
-      cancel_url: 'https://stripe-esp32.onrender.com/cancel',
+      success_url: 'https://project32-6fek.onrender.com/success',
+      cancel_url: 'https://project32-6fek.onrender.com/cancel',
     });
 
     console.log(`[RETRIEVE] Locker ${lockerId} - Time: ${minutes} min(s), Rate: ${RATE_PER_MINUTE} THB/min, Total: ${totalPrice} THB`);
@@ -151,7 +151,6 @@ app.get('/check', (req, res) => {
   const locker = lockers[lockerId];
 
   if (locker && locker.paid) {
-    // รีเซ็ตสถานะตู้กลับเป็นว่าง
     lockers[lockerId] = { status: 'FREE', pin: null, startTime: null, paid: false, price: 0 };
     console.log(`[UNLOCK] Payment confirmed for Locker ${lockerId}. Sending ON signal.`);
     return res.json({ status: 'ON' });
