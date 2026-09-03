@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const Stripe = require('stripe');
-const nodemailer = require('nodemailer'); 
+const { Resend } = require('resend'); // เปลี่ยนจาก nodemailer เป็น resend
 
 const app = express();
 
@@ -10,33 +10,11 @@ const RATE_PER_MINUTE = 1;
 const MINIMUM_PRICE = 10;
 const SERVER_URL = process.env.SERVER_URL || 'https://project32-6fek.onrender.com';
 
-// ดึง Stripe Secret Key จาก Environment Variable
+// Stripe Config
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_your_stripe_secret_key');
 
-// Config การส่ง Email ผ่าน Nodemailer (แก้ไขสำหรับ Render Cloud Server)
-const transporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
-  port: 587,
-  secure: false, // ใช้ TLS บนพอร์ต 587
-  requireTLS: true,
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS
-  },
-  family: 4, // บังคับใช้ IPv4 เพื่อป้องกัน Connection Timeout บน Render
-  connectionTimeout: 10000, // 10 วินาที
-  greetingTimeout: 5000,
-  socketTimeout: 10000
-});
-
-// ตรวจสอบสถานะการเชื่อมต่อ Mail Server เมื่อเปิดบริการ
-transporter.verify((error, success) => {
-  if (error) {
-    console.error('[SMTP ERROR] ไม่สามารถเชื่อมต่อกับ Gmail SMTP:', error.message);
-  } else {
-    console.log('[SMTP SUCCESS] เชื่อมต่อกับ Gmail SMTP เรียบร้อยแล้ว');
-  }
-});
+// Resend Config (ส่งผ่าน HTTPS Port 443 หมดปัญหาเรื่อง Timeout บน Render)
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 // ข้อมูลสถานะตู้ในระบบ
 const lockers = {
@@ -48,16 +26,15 @@ const lockers = {
 app.use(cors());
 
 // ============================================================
-// 1. STRIPE WEBHOOK ROUTE (ต้องอยู่ก่อน express.json())
+// 1. STRIPE WEBHOOK ROUTE
 // ============================================================
 app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
-
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET || process.env.WEBHOOK_SECRET;
 
   if (!webhookSecret) {
-    console.error('[WEBHOOK ERROR] Webhook secret is not defined in environment variables!');
+    console.error('[WEBHOOK ERROR] Webhook secret is not defined!');
     return res.status(500).send('Webhook secret missing');
   }
 
@@ -96,29 +73,22 @@ app.use(express.urlencoded({ extended: true }));
 // ============================================================
 
 app.get('/', (req, res) => {
-  res.send('Smart Locker Backend with Web Form & Stripe is running!');
+  res.send('Smart Locker Backend running with Resend API!');
 });
 
 app.get('/api/lockers', (req, res) => {
   res.json({ success: true, lockers });
 });
 
-// --- สร้างลิงก์หน้าเว็บฟอร์มสำหรับสแกน QR Code ---
 app.post('/api/generate-deposit-qr', (req, res) => {
   const { lockerId } = req.body;
-
-  if (!lockers[lockerId]) {
-    return res.status(400).json({ success: false, message: 'Invalid locker ID' });
-  }
-  if (lockers[lockerId].status !== 'FREE') {
-    return res.status(400).json({ success: false, message: 'Locker is currently in use' });
-  }
+  if (!lockers[lockerId]) return res.status(400).json({ success: false, message: 'Invalid locker ID' });
+  if (lockers[lockerId].status !== 'FREE') return res.status(400).json({ success: false, message: 'Locker is currently in use' });
 
   const formUrl = `${SERVER_URL}/form?lockerId=${lockerId}`;
   res.json({ success: true, formUrl: formUrl });
 });
 
-// --- หน้าเว็บฟอร์มสำหรับมือถือสแกนกรอก Email และ PIN ---
 app.get('/form', (req, res) => {
   const lockerId = req.query.lockerId;
   res.send(`
@@ -155,16 +125,12 @@ app.get('/form', (req, res) => {
   `);
 });
 
-// --- รับค่าจากเว็บฟอร์มมือถือ เปลี่ยนสถานะตู้เป็น BUSY และส่งอีเมลยืนยัน PIN ---
+// --- ฝากของ และ ส่งอีเมลยืนยัน PIN ผ่าน Resend ---
 app.post('/submit-deposit', async (req, res) => {
   const { lockerId, email, pin } = req.body;
 
-  if (!lockers[lockerId]) {
-    return res.status(400).send('Invalid locker ID');
-  }
-  if (lockers[lockerId].status !== 'FREE') {
-    return res.status(400).send('Locker is already in use');
-  }
+  if (!lockers[lockerId]) return res.status(400).send('Invalid locker ID');
+  if (lockers[lockerId].status !== 'FREE') return res.status(400).send('Locker is already in use');
 
   lockers[lockerId] = {
     status: 'BUSY',
@@ -178,9 +144,9 @@ app.post('/submit-deposit', async (req, res) => {
   console.log(`[WEB DEPOSIT] Locker ${lockerId} locked via Mobile QR. Email: ${email}, PIN: ${pin}`);
 
   try {
-    await transporter.sendMail({
-      from: `"Smart Locker System" <${process.env.EMAIL_USER}>`,
-      to: email,
+    await resend.emails.send({
+      from: 'Smart Locker <onboarding@resend.dev>', // อีเมลสำหรับทดสอบของ Resend
+      to: [email],
       subject: `Deposit Confirmed - Locker #${lockerId}`,
       html: `
         <div style="font-family: Arial, sans-serif; padding: 20px;">
@@ -192,9 +158,9 @@ app.post('/submit-deposit', async (req, res) => {
         </div>
       `
     });
-    console.log(`[EMAIL SENT] Confirmation sent to ${email}`);
+    console.log(`[RESEND SUCCESS] Confirmation email sent to ${email}`);
   } catch (error) {
-    console.error('[EMAIL ERROR]', error.message);
+    console.error('[RESEND ERROR]', error.message);
   }
 
   res.send(`
@@ -211,27 +177,20 @@ app.post('/submit-deposit', async (req, res) => {
   `);
 });
 
-// --- API สำหรับตรวจสอบ PIN ตอนกดนำของออก และสร้าง Stripe Checkout Session ---
+// --- API ตรวจสอบ PIN และสร้าง Stripe Session ---
 app.post('/api/retrieve', async (req, res) => {
   const { lockerId, pin } = req.body;
   const locker = lockers[lockerId];
 
-  if (!locker || locker.status === 'FREE') {
-    return res.status(400).json({ success: false, message: 'Locker is empty' });
-  }
-
-  if (locker.pin !== pin) {
-    return res.status(401).json({ success: false, message: 'Incorrect PIN' });
-  }
+  if (!locker || locker.status === 'FREE') return res.status(400).json({ success: false, message: 'Locker is empty' });
+  if (locker.pin !== pin) return res.status(401).json({ success: false, message: 'Incorrect PIN' });
 
   const durationMs = Date.now() - locker.startTime;
   let minutes = Math.ceil(durationMs / 60000);
   if (minutes < 1) minutes = 1;
 
   let totalPrice = minutes * RATE_PER_MINUTE;
-  if (totalPrice < MINIMUM_PRICE) {
-    totalPrice = MINIMUM_PRICE;
-  }
+  if (totalPrice < MINIMUM_PRICE) totalPrice = MINIMUM_PRICE;
   locker.price = totalPrice;
 
   try {
@@ -240,9 +199,7 @@ app.post('/api/retrieve', async (req, res) => {
       line_items: [{
         price_data: {
           currency: 'thb',
-          product_data: {
-            name: `Smart Locker #${lockerId} (${minutes} Mins)`,
-          },
+          product_data: { name: `Smart Locker #${lockerId} (${minutes} Mins)` },
           unit_amount: totalPrice * 100,
         },
         quantity: 1,
@@ -254,38 +211,28 @@ app.post('/api/retrieve', async (req, res) => {
     });
 
     console.log(`[RETRIEVE] Session created for Locker ${lockerId}: ${totalPrice} THB (${minutes} mins)`);
-
-    res.json({
-      success: true,
-      minutes: minutes,
-      amount: `${totalPrice}.00 THB`,
-      stripeUrl: session.url
-    });
+    res.json({ success: true, minutes: minutes, amount: `${totalPrice}.00 THB`, stripeUrl: session.url });
   } catch (error) {
     console.error('[STRIPE ERROR]', error.message);
     res.status(500).json({ success: false, message: 'Failed to create payment session' });
   }
 });
 
-// --- API สำหรับส่ง OTP / PIN ใหม่ไปยังอีเมล (กรณีลืมรหัสผ่าน) ---
+// --- ส่ง OTP / PIN ใหม่ผ่าน Resend ---
 app.post('/api/send-otp', async (req, res) => {
   const { lockerId } = req.body;
   const locker = lockers[lockerId];
 
-  if (!locker) {
-    return res.status(400).json({ success: false, message: 'Invalid locker ID' });
-  }
-  if (!locker.customerEmail) {
-    return res.status(400).json({ success: false, message: 'No email found for this locker.' });
-  }
+  if (!locker) return res.status(400).json({ success: false, message: 'Invalid locker ID' });
+  if (!locker.customerEmail) return res.status(400).json({ success: false, message: 'No email found for this locker.' });
 
   const newPin = Math.floor(100000 + Math.random() * 900000).toString();
   locker.pin = newPin;
 
   try {
-    await transporter.sendMail({
-      from: `"Smart Locker System" <${process.env.EMAIL_USER}>`,
-      to: locker.customerEmail,
+    await resend.emails.send({
+      from: 'Smart Locker <onboarding@resend.dev>',
+      to: [locker.customerEmail],
       subject: `Your New Unlock Code for Locker #${lockerId}`,
       html: `
         <div style="font-family: Arial, sans-serif; padding: 20px;">
@@ -297,15 +244,15 @@ app.post('/api/send-otp', async (req, res) => {
       `
     });
 
-    console.log(`[OTP SENT] New PIN ${newPin} sent to ${locker.customerEmail} for Locker ${lockerId}`);
+    console.log(`[OTP SENT] New PIN ${newPin} sent to ${locker.customerEmail}`);
     res.json({ success: true, message: 'OTP email sent successfully' });
   } catch (error) {
-    console.error('[EMAIL ERROR]', error.message);
+    console.error('[RESEND ERROR]', error.message);
     res.status(500).json({ success: false, message: 'Failed to send email' });
   }
 });
 
-// --- API เช็คสถานะการชำระเงินเพื่อสั่งปลดล็อกตู้ฝั่ง ESP32 ---
+// --- API สำหรับ ESP32 เช็คสถานะ ---
 app.get('/check', (req, res) => {
   const lockerId = req.query.lockerId || 1;
   const locker = lockers[lockerId];
@@ -319,33 +266,12 @@ app.get('/check', (req, res) => {
   res.json({ status: 'OFF' });
 });
 
-// --- หน้าเว็บ Success หลังจ่ายเงินสำเร็จผ่าน Stripe ---
 app.get('/success', (req, res) => {
-  res.send(`
-    <!DOCTYPE html>
-    <html>
-    <head><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Payment Success</title></head>
-    <body style="background:#0f172a;color:#fff;text-align:center;padding-top:50px;font-family:sans-serif;">
-      <h1 style="color:#22c55e;">Payment Successful!</h1>
-      <p>Your locker is now unlocking. Please retrieve your items.</p>
-      <p style="color:#94a3b8; font-size:14px; margin-top:30px;">You can close this window now.</p>
-    </body>
-    </html>
-  `);
+  res.send(`<h1 style="color:#22c55e;text-align:center;padding-top:50px;">Payment Successful!</h1>`);
 });
 
-// --- หน้าเว็บ Cancel หากผู้ใช้ยกเลิกการจ่ายเงินผ่าน Stripe ---
 app.get('/cancel', (req, res) => {
-  res.send(`
-    <!DOCTYPE html>
-    <html>
-    <head><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Payment Cancelled</title></head>
-    <body style="background:#0f172a;color:#fff;text-align:center;padding-top:50px;font-family:sans-serif;">
-      <h1 style="color:#ef4444;">Payment Cancelled</h1>
-      <p>You have cancelled the payment process.</p>
-    </body>
-    </html>
-  `);
+  res.send(`<h1 style="color:#ef4444;text-align:center;padding-top:50px;">Payment Cancelled</h1>`);
 });
 
 const PORT = process.env.PORT || 3000;
