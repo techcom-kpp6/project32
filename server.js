@@ -4,6 +4,12 @@ const Stripe = require('stripe');
 
 const app = express();
 
+// ==========================================
+// ตั้งค่าราคาบริการตรงนี้
+// ==========================================
+const RATE_PER_MINUTE = 2; // <--- แก้ไขตัวเลขนี้เพื่อเปลี่ยนราคาต่อนาที (เช่น 2 = นาทีละ 2 บาท, 5 = นาทีละ 5 บาท)
+const MINIMUM_PRICE = 10;   // ราคาขั้นต่ำของระบบ (Stripe บังคับขั้นต่ำ 10 THB)
+
 // ใส่ Stripe Secret Key (หรือใช้ผ่าน Environment Variable บน Render)
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_your_stripe_secret_key');
 
@@ -97,10 +103,12 @@ app.post('/api/retrieve', async (req, res) => {
   let minutes = Math.ceil(durationMs / 60000);
   if (minutes < 1) minutes = 1;
 
-  // คิดค่าบริการ (กำหนดขั้นต่ำที่ 10 THB เพื่อให้ผ่านเงื่อนไขของ Stripe)
-  let totalPrice = minutes * 1;
-  if (totalPrice < 10) {
-    totalPrice = 10; // ปรับเป็นขั้นต่ำ 10 บาท
+  // คำนวณราคาตามอัตราต่อนาทีที่กำหนดไว้
+  let totalPrice = minutes * RATE_PER_MINUTE;
+
+  // กำหนดขั้นต่ำที่ 10 THB เพื่อให้ผ่านเงื่อนไขของ Stripe
+  if (totalPrice < MINIMUM_PRICE) {
+    totalPrice = MINIMUM_PRICE;
   }
   locker.price = totalPrice;
 
@@ -111,9 +119,9 @@ app.post('/api/retrieve', async (req, res) => {
         price_data: {
           currency: 'thb',
           product_data: {
-            name: `Smart Locker #${lockerId} (${minutes} Mins)`,
+            name: `Smart Locker #${lockerId} (${minutes} Mins @ ${RATE_PER_MINUTE} THB/Min)`,
           },
-          unit_amount: totalPrice * 100, // สตางค์ (1000 สตางค์ = 10 บาท)
+          unit_amount: totalPrice * 100, // สตางค์
         },
         quantity: 1,
       }],
@@ -123,7 +131,7 @@ app.post('/api/retrieve', async (req, res) => {
       cancel_url: 'https://stripe-esp32.onrender.com/cancel',
     });
 
-    console.log(`[RETRIEVE] Locker ${lockerId} - Time: ${minutes} min(s), Price: ${totalPrice} THB`);
+    console.log(`[RETRIEVE] Locker ${lockerId} - Time: ${minutes} min(s), Rate: ${RATE_PER_MINUTE} THB/min, Total: ${totalPrice} THB`);
 
     res.json({
       success: true,
