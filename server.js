@@ -13,7 +13,7 @@ const SERVER_URL = process.env.SERVER_URL || 'https://project32-6fek.onrender.co
 // ดึง Stripe Secret Key จาก Environment Variable
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_your_stripe_secret_key');
 
-// Config การส่ง Email
+// Config การส่ง Email ผ่าน Nodemailer
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
@@ -32,7 +32,7 @@ const lockers = {
 app.use(cors());
 
 // ============================================================
-// 1. STRIPE WEBHOOK ROUTE 
+// 1. STRIPE WEBHOOK ROUTE (ต้องอยู่ก่อน express.json())
 // ============================================================
 app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
   const sig = req.headers['stripe-signature'];
@@ -59,7 +59,9 @@ app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
 
     if (lockers[lockerId]) {
       lockers[lockerId].paid = true;
-      lockers[lockerId].customerEmail = email; 
+      if (email) {
+        lockers[lockerId].customerEmail = email;
+      }
       console.log(`[PAYMENT SUCCESS] Locker ${lockerId} marked as PAID. Email: ${email}`);
     }
   }
@@ -152,7 +154,7 @@ app.post('/submit-deposit', async (req, res) => {
     status: 'BUSY',
     pin: pin,
     startTime: Date.now(),
-    paid: true, 
+    paid: false, 
     price: 0,
     customerEmail: email
   };
@@ -298,6 +300,35 @@ app.get('/check', (req, res) => {
   }
 
   res.json({ status: 'OFF' });
+});
+
+// --- หน้าเว็บ Success หลังจ่ายเงินสำเร็จผ่าน Stripe ---
+app.get('/success', (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Payment Success</title></head>
+    <body style="background:#0f172a;color:#fff;text-align:center;padding-top:50px;font-family:sans-serif;">
+      <h1 style="color:#22c55e;">Payment Successful!</h1>
+      <p>Your locker is now unlocking. Please retrieve your items.</p>
+      <p style="color:#94a3b8; font-size:14px; margin-top:30px;">You can close this window now.</p>
+    </body>
+    </html>
+  `);
+});
+
+// --- หน้าเว็บ Cancel หากผู้ใช้ยกเลิกการจ่ายเงินผ่าน Stripe ---
+app.get('/cancel', (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Payment Cancelled</title></head>
+    <body style="background:#0f172a;color:#fff;text-align:center;padding-top:50px;font-family:sans-serif;">
+      <h1 style="color:#ef4444;">Payment Cancelled</h1>
+      <p>You have cancelled the payment process.</p>
+    </body>
+    </html>
+  `);
 });
 
 const PORT = process.env.PORT || 3000;
