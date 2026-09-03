@@ -13,16 +13,32 @@ const SERVER_URL = process.env.SERVER_URL || 'https://project32-6fek.onrender.co
 // ดึง Stripe Secret Key จาก Environment Variable
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_your_stripe_secret_key');
 
-// Config การส่ง Email ผ่าน Nodemailer
+// Config การส่ง Email ผ่าน Nodemailer (แก้ไขสำหรับ Render Cloud Server)
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
+  host: 'smtp.gmail.com',
+  port: 587,
+  secure: false, // ใช้ TLS บนพอร์ต 587
+  requireTLS: true,
   auth: {
-    user: process.env.EMAIL_USER || 'your_email@gmail.com',
-    pass: process.env.EMAIL_PASS || 'your_app_password'
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS
+  },
+  family: 4, // บังคับใช้ IPv4 เพื่อป้องกัน Connection Timeout บน Render
+  connectionTimeout: 10000, // 10 วินาที
+  greetingTimeout: 5000,
+  socketTimeout: 10000
+});
+
+// ตรวจสอบสถานะการเชื่อมต่อ Mail Server เมื่อเปิดบริการ
+transporter.verify((error, success) => {
+  if (error) {
+    console.error('[SMTP ERROR] ไม่สามารถเชื่อมต่อกับ Gmail SMTP:', error.message);
+  } else {
+    console.log('[SMTP SUCCESS] เชื่อมต่อกับ Gmail SMTP เรียบร้อยแล้ว');
   }
 });
 
-// ข้อมูลสถานะตู้ในระบบ (เก็บ customerEmail และสถานะต่างๆ)
+// ข้อมูลสถานะตู้ในระบบ
 const lockers = {
   1: { status: 'FREE', pin: null, startTime: null, paid: false, price: 0, customerEmail: null },
   2: { status: 'FREE', pin: null, startTime: null, paid: false, price: 0, customerEmail: null },
@@ -163,7 +179,7 @@ app.post('/submit-deposit', async (req, res) => {
 
   try {
     await transporter.sendMail({
-      from: '"Smart Locker System" <no-reply@smartlocker.com>',
+      from: `"Smart Locker System" <${process.env.EMAIL_USER}>`,
       to: email,
       subject: `Deposit Confirmed - Locker #${lockerId}`,
       html: `
@@ -176,8 +192,9 @@ app.post('/submit-deposit', async (req, res) => {
         </div>
       `
     });
+    console.log(`[EMAIL SENT] Confirmation sent to ${email}`);
   } catch (error) {
-    console.error('[EMAIL ERROR]', error);
+    console.error('[EMAIL ERROR]', error.message);
   }
 
   res.send(`
@@ -267,7 +284,7 @@ app.post('/api/send-otp', async (req, res) => {
 
   try {
     await transporter.sendMail({
-      from: '"Smart Locker System" <no-reply@smartlocker.com>',
+      from: `"Smart Locker System" <${process.env.EMAIL_USER}>`,
       to: locker.customerEmail,
       subject: `Your New Unlock Code for Locker #${lockerId}`,
       html: `
@@ -283,7 +300,7 @@ app.post('/api/send-otp', async (req, res) => {
     console.log(`[OTP SENT] New PIN ${newPin} sent to ${locker.customerEmail} for Locker ${lockerId}`);
     res.json({ success: true, message: 'OTP email sent successfully' });
   } catch (error) {
-    console.error('[EMAIL ERROR]', error);
+    console.error('[EMAIL ERROR]', error.message);
     res.status(500).json({ success: false, message: 'Failed to send email' });
   }
 });
