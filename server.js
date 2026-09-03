@@ -8,11 +8,10 @@ const app = express();
 // --- Configuration ---
 const RATE_PER_MINUTE = 1;
 const MINIMUM_PRICE = 10;
+const SERVER_URL = process.env.SERVER_URL || 'https://project32-6fek.onrender.com';
 
-// ดึง Stripe Secret Key จาก Environment Variable
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_your_stripe_secret_key');
 
-// Config การส่ง Email
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
@@ -21,7 +20,6 @@ const transporter = nodemailer.createTransport({
   }
 });
 
-// ข้อมูลสถานะตู้ในระบบ (เพิ่ม customerEmail)
 const lockers = {
   1: { status: 'FREE', pin: null, startTime: null, paid: false, price: 0, customerEmail: null },
   2: { status: 'FREE', pin: null, startTime: null, paid: false, price: 0, customerEmail: null },
@@ -84,7 +82,20 @@ app.get('/api/lockers', (req, res) => {
   res.json({ success: true, lockers });
 });
 
-// --- เพิ่มใหม่: หน้าเว็บฟอร์มสำหรับสแกน QR Code กรอกข้อมูลฝากของ ---
+app.post('/api/generate-deposit-qr', (req, res) => {
+  const { lockerId } = req.body;
+
+  if (!lockers[lockerId]) {
+    return res.status(400).json({ success: false, message: 'Invalid locker ID' });
+  }
+  if (lockers[lockerId].status !== 'FREE') {
+    return res.status(400).json({ success: false, message: 'Locker is currently in use' });
+  }
+
+  const formUrl = `${SERVER_URL}/form?lockerId=${lockerId}`;
+  res.json({ success: true, formUrl: formUrl });
+});
+
 app.get('/form', (req, res) => {
   const lockerId = req.query.lockerId;
   res.send(`
@@ -121,7 +132,6 @@ app.get('/form', (req, res) => {
   `);
 });
 
-// --- เพิ่มใหม่: รับค่าจากเว็บฟอร์มมือถือ แล้วเปลี่ยนสถานะตู้เป็น BUSY และส่งอีเมลยืนยัน ---
 app.post('/submit-deposit', async (req, res) => {
   const { lockerId, email, pin } = req.body;
 
@@ -132,19 +142,15 @@ app.post('/submit-deposit', async (req, res) => {
     return res.status(400).send('Locker is already in use');
   }
 
-  // อัปเดตสถานะตู้ในระบบ
   lockers[lockerId] = {
     status: 'BUSY',
     pin: pin,
     startTime: Date.now(),
-    paid: false,
+    paid: true, 
     price: 0,
     customerEmail: email
   };
 
-  console.log(`[WEB DEPOSIT] Locker ${lockerId} locked via Mobile QR. Email: ${email}, PIN: ${pin}`);
-
-  // ส่งอีเมลยืนยันการฝากของพร้อมแจ้ง PIN
   try {
     await transporter.sendMail({
       from: '"Smart Locker System" <no-reply@smartlocker.com>',
@@ -164,7 +170,6 @@ app.post('/submit-deposit', async (req, res) => {
     console.error('[EMAIL ERROR]', error);
   }
 
-  // แสดงหน้าสำเร็จบนมือถือของผู้ใช้
   res.send(`
     <!DOCTYPE html>
     <html>
@@ -177,29 +182,6 @@ app.post('/submit-deposit', async (req, res) => {
     </body>
     </html>
   `);
-});
-
-app.post('/api/deposit', (req, res) => {
-  const { lockerId, pin } = req.body;
-
-  if (!lockers[lockerId]) {
-    return res.status(400).json({ success: false, message: 'Invalid locker ID' });
-  }
-  if (lockers[lockerId].status !== 'FREE') {
-    return res.status(400).json({ success: false, message: 'Locker is currently in use' });
-  }
-
-  lockers[lockerId] = {
-    status: 'BUSY',
-    pin: pin,
-    startTime: Date.now(),
-    paid: false,
-    price: 0,
-    customerEmail: null
-  };
-
-  console.log(`[DEPOSIT] Locker ${lockerId} locked successfully with PIN: ${pin}`);
-  res.json({ success: true, message: 'Deposit recorded successfully' });
 });
 
 app.post('/api/retrieve', async (req, res) => {
@@ -239,11 +221,9 @@ app.post('/api/retrieve', async (req, res) => {
       }],
       mode: 'payment',
       metadata: { lockerId: String(lockerId) },
-      success_url: 'https://project32-6fek.onrender.com/success',
-      cancel_url: 'https://project32-6fek.onrender.com/cancel',
+      success_url: `${SERVER_URL}/success`,
+      cancel_url: `${SERVER_URL}/cancel`,
     });
-
-    console.log(`[RETRIEVE] Session created for Locker ${lockerId}: ${totalPrice} THB (${minutes} mins)`);
 
     res.json({
       success: true,
@@ -257,6 +237,7 @@ app.post('/api/retrieve', async (req, res) => {
   }
 });
 
+// --- API สำหรับส่ง OTP หรือ PIN ใหม่ไปยังอีเมลที่ลูกค้าเคยลงทะเบียนไว้ ---
 app.post('/api/send-otp', async (req, res) => {
   const { lockerId } = req.body;
   const locker = lockers[lockerId];
@@ -264,7 +245,6 @@ app.post('/api/send-otp', async (req, res) => {
   if (!locker) {
     return res.status(400).json({ success: false, message: 'Invalid locker ID' });
   }
-
   if (!locker.customerEmail) {
     return res.status(400).json({ success: false, message: 'No email found for this locker.' });
   }
@@ -301,7 +281,7 @@ app.get('/check', (req, res) => {
 
   if (locker && locker.paid) {
     lockers[lockerId] = { status: 'FREE', pin: null, startTime: null, paid: false, price: 0, customerEmail: null };
-    console.log(`[UNLOCK] Locker ${lockerId} paid! Sending ON signal to ESP32.`);
+    console.log(`[UNLOCK] Locker ${lockerId} paid/completed! Sending ON signal to ESP32.`);
     return res.json({ status: 'ON' });
   }
 
