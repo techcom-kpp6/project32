@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const Stripe = require('stripe');
+const nodemailer = require('nodemailer'); // 1. เพิ่ม Nodemailer
 
 const app = express();
 
@@ -11,24 +12,31 @@ const MINIMUM_PRICE = 10;
 // ดึง Stripe Secret Key จาก Environment Variable
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_your_stripe_secret_key');
 
-// ข้อมูลสถานะตู้ในระบบ (In-Memory Data)
+// Config การส่ง Email (แนะนำให้ตั้งค่าผ่าน Environment Variables)
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER || 'your_email@gmail.com', // อีเมลผู้ส่ง
+    pass: process.env.EMAIL_PASS || 'your_app_password'     // Gmail App Password
+  }
+});
+
+// ข้อมูลสถานะตู้ในระบบ (เพิ่ม customerEmail)
 const lockers = {
-  1: { status: 'FREE', pin: null, startTime: null, paid: false, price: 0 },
-  2: { status: 'FREE', pin: null, startTime: null, paid: false, price: 0 },
-  3: { status: 'FREE', pin: null, startTime: null, paid: false, price: 0 }
+  1: { status: 'FREE', pin: null, startTime: null, paid: false, price: 0, customerEmail: null },
+  2: { status: 'FREE', pin: null, startTime: null, paid: false, price: 0, customerEmail: null },
+  3: { status: 'FREE', pin: null, startTime: null, paid: false, price: 0, customerEmail: null }
 };
 
 app.use(cors());
 
 // ============================================================
 // 1. STRIPE WEBHOOK ROUTE 
-// *** ต้องวางไว้ก่อน express.json() และใช้ express.raw() เท่านั้น ***
 // ============================================================
 app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
 
-  // อ่านค่า Signing Secret (รองรับทั้งชื่อ STRIPE_WEBHOOK_SECRET และ WEBHOOK_SECRET)
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET || process.env.WEBHOOK_SECRET;
 
   if (!webhookSecret) {
@@ -37,7 +45,6 @@ app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
   }
 
   try {
-    // ยืนยันข้อมูลดิบ (Raw Buffer) ร่วมกับ Signature จาก Stripe
     event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
   } catch (err) {
     console.error(`[WEBHOOK ERROR] ${err.message}`);
@@ -48,10 +55,12 @@ app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
   if (event.type === 'checkout.session.completed') {
     const session = event.data.object;
     const lockerId = session.metadata.lockerId;
+    const email = session.customer_details ? session.customer_details.email : null;
 
     if (lockers[lockerId]) {
       lockers[lockerId].paid = true;
-      console.log(`[PAYMENT SUCCESS] Locker ${lockerId} marked as PAID via Webhook`);
+      lockers[lockerId].customerEmail = email; // บันทึกอีเมลที่กรอกตอนจ่ายเงิน
+      console.log(`[PAYMENT SUCCESS] Locker ${lockerId} marked as PAID. Email: ${email}`);
     }
   }
 
@@ -60,7 +69,6 @@ app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
 
 // ============================================================
 // 2. GENERAL MIDDLEWARES
-// *** แปลง JSON สำหรับ Route ทั่วไป (วางไว้ใต้ Webhook) ***
 // ============================================================
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -69,17 +77,14 @@ app.use(express.urlencoded({ extended: true }));
 // 3. API ENDPOINTS
 // ============================================================
 
-// Home / Health check
 app.get('/', (req, res) => {
   res.send('Smart Locker Backend with Stripe Webhook is running!');
 });
 
-// GET /api/lockers - ดึงสถานะตู้ทั้งหมด
 app.get('/api/lockers', (req, res) => {
   res.json({ success: true, lockers });
 });
 
-// POST /api/deposit - ฝากของและตั้งรหัส PIN
 app.post('/api/deposit', (req, res) => {
   const { lockerId, pin } = req.body;
 
@@ -95,14 +100,14 @@ app.post('/api/deposit', (req, res) => {
     pin: pin,
     startTime: Date.now(),
     paid: false,
-    price: 0
+    price: 0,
+    customerEmail: null
   };
 
   console.log(`[DEPOSIT] Locker ${lockerId} locked successfully with PIN: ${pin}`);
   res.json({ success: true, message: 'Deposit recorded successfully' });
 });
 
-// POST /api/retrieve - คำนวณเวลา และสร้าง Stripe Checkout Session
 app.post('/api/retrieve', async (req, res) => {
   const { lockerId, pin } = req.body;
   const locker = lockers[lockerId];
@@ -115,12 +120,10 @@ app.post('/api/retrieve', async (req, res) => {
     return res.status(401).json({ success: false, message: 'Incorrect PIN' });
   }
 
-  // คำนวณระยะเวลาใช้งาน (ปัดเศษนาทีขึ้น)
   const durationMs = Date.now() - locker.startTime;
   let minutes = Math.ceil(durationMs / 60000);
   if (minutes < 1) minutes = 1;
 
-  // คำนวณราคา (นาทีละ 1 บาท, ขั้นต่ำ 10 บาท)
   let totalPrice = minutes * RATE_PER_MINUTE;
   if (totalPrice < MINIMUM_PRICE) {
     totalPrice = MINIMUM_PRICE;
@@ -136,7 +139,7 @@ app.post('/api/retrieve', async (req, res) => {
           product_data: {
             name: `Smart Locker #${lockerId} (${minutes} Mins)`,
           },
-          unit_amount: totalPrice * 100, // สตางค์
+          unit_amount: totalPrice * 100,
         },
         quantity: 1,
       }],
@@ -160,14 +163,52 @@ app.post('/api/retrieve', async (req, res) => {
   }
 });
 
-// GET /check - ESP32 Polling เช็คการชำระเงิน
+// API ใหม่: ส่งรหัสผ่านสุ่ม OTP ไปที่อีเมลที่กรอกตอนชำระเงิน
+app.post('/api/send-otp', async (req, res) => {
+  const { lockerId } = req.body;
+  const locker = lockers[lockerId];
+
+  if (!locker) {
+    return res.status(400).json({ success: false, message: 'Invalid locker ID' });
+  }
+
+  if (!locker.customerEmail) {
+    return res.status(400).json({ success: false, message: 'No email found for this locker. Please complete payment first.' });
+  }
+
+  // สุ่มรหัส PIN ใหม่ 6 หลัก
+  const newPin = Math.floor(100000 + Math.random() * 900000).toString();
+  locker.pin = newPin; // อัปเดตรหัส PIN ในระบบทันที
+
+  try {
+    await transporter.sendMail({
+      from: '"Smart Locker System" <no-reply@smartlocker.com>',
+      to: locker.customerEmail,
+      subject: `Your New Unlock Code for Locker #${lockerId}`,
+      html: `
+        <div style="font-family: Arial, sans-serif; padding: 20px;">
+          <h2>Smart Locker OTP Code</h2>
+          <p>Your new 6-digit PIN code to unlock Locker <b>#${lockerId}</b> is:</p>
+          <h1 style="color: #2563eb; letter-spacing: 5px; font-size: 36px;">${newPin}</h1>
+          <p>Please enter this code on the locker screen to retrieve your items.</p>
+        </div>
+      `
+    });
+
+    console.log(`[OTP SENT] New PIN ${newPin} sent to ${locker.customerEmail} for Locker ${lockerId}`);
+    res.json({ success: true, message: 'OTP email sent successfully' });
+  } catch (error) {
+    console.error('[EMAIL ERROR]', error);
+    res.status(500).json({ success: false, message: 'Failed to send email' });
+  }
+});
+
 app.get('/check', (req, res) => {
   const lockerId = req.query.lockerId || 1;
   const locker = lockers[lockerId];
 
   if (locker && locker.paid) {
-    // เมื่อชำระเงินแล้ว รีเซ็ตสถานะตู้เป็นว่างทันที
-    lockers[lockerId] = { status: 'FREE', pin: null, startTime: null, paid: false, price: 0 };
+    lockers[lockerId] = { status: 'FREE', pin: null, startTime: null, paid: false, price: 0, customerEmail: null };
     console.log(`[UNLOCK] Locker ${lockerId} paid! Sending ON signal to ESP32.`);
     return res.json({ status: 'ON' });
   }
@@ -175,7 +216,6 @@ app.get('/check', (req, res) => {
   res.json({ status: 'OFF' });
 });
 
-// --- Start Server ---
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`[SERVER] Smart Locker Backend running on port ${PORT}`);
