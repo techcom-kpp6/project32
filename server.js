@@ -9,6 +9,10 @@ const stripe = Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_your_stripe_secr
 
 app.use(cors());
 
+app.get('/', (req, res) => {
+  res.send('Smart Locker API Server is running!');
+});
+
 // Webhook Route ต้องอยู่ก่อน express.json() เพื่อรับ Raw Body สำหรับตรวจสอบ Signature
 app.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
   const sig = req.headers['stripe-signature'];
